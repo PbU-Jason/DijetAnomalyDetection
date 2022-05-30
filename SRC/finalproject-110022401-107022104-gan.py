@@ -200,8 +200,11 @@ tf.keras.backend.clear_session()
 GAN_noise_size = 128
 n_features = Train_rescaled.shape[1]
 
-d_optimizer = Adam(learning_rate=0.00001, beta_1=0.5, beta_2=0.9)
-g_optimizer = Adam(learning_rate=0.00001, beta_1=0.5, beta_2=0.9)
+# d_optimizer = Adam(learning_rate=0.00001, beta_1=0.5, beta_2=0.9)
+# g_optimizer = Adam(learning_rate=0.00001, beta_1=0.5, beta_2=0.9)
+
+d_optimizer = SGD(0.01)
+g_optimizer = SGD(0.01)
 
 generator = make_generator_cnn(GAN_noise_size, n_features)
 generator._name = "Generator"

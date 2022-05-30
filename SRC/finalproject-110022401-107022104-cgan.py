@@ -227,8 +227,11 @@ tf.keras.backend.clear_session()
 GAN_noise_size = 128
 n_features = Train_rescaled.shape[1]
 
-d_optimizer = Adam(learning_rate=0.00001, beta_1=0.5, beta_2=0.9)
-g_optimizer = Adam(learning_rate=0.00001, beta_1=0.5, beta_2=0.9)
+# d_optimizer = Adam(learning_rate=0.00001, beta_1=0.5, beta_2=0.9)
+# g_optimizer = Adam(learning_rate=0.00001, beta_1=0.5, beta_2=0.9)
+
+d_optimizer = SGD(0.01)
+g_optimizer = SGD(0.01)
 
 generator = make_generator_cnn(GAN_noise_size, n_features)
 generator._name = "cGAN_Generator"
@@ -261,57 +264,79 @@ def train_loop(epochs, batch_size):
     
     saved_epoch_list = []
     saved_fakedata_list = []
+    epoch_g_stop = epochs
+    epoch_d_stop = epochs
+    d_acc_count = 0
     for epoch in range(epochs):
         
-        # ---------------------
-        #  Train Discriminator
-        # ---------------------
+        if epoch < epoch_d_stop:
+            # ---------------------
+            #  Train Discriminator
+            # ---------------------
 
-        Train_rescaled_idx = np.random.randint(0, Train_rescaled.shape[0], size=batch_size)
-        Train_rescaled_real = Train_rescaled[Train_rescaled_idx, :]
-        Condition_Train_rescaled_real = Condition_Train_rescaled[Train_rescaled_idx, :]
+            Train_rescaled_idx = np.random.randint(0, Train_rescaled.shape[0], size=batch_size)
+            Train_rescaled_real = Train_rescaled[Train_rescaled_idx, :]
+            Condition_Train_rescaled_real = Condition_Train_rescaled[Train_rescaled_idx, :]
 
-        # generate fake events
-        Train_rescaled_noise = np.random.uniform(0, 1, size=[batch_size, GAN_noise_size])
-        Train_rescaled_fake = generator.predict([Train_rescaled_noise, Condition_Train_rescaled_real])
+            # generate fake events
+            Train_rescaled_noise = np.random.uniform(0, 1, size=[batch_size, GAN_noise_size])
+            Train_rescaled_fake = generator.predict([Train_rescaled_noise, Condition_Train_rescaled_real])
 
-        discriminator.trainable = True
+            discriminator.trainable = True
 
-        d_loss_r, d_acc_r = discriminator.train_on_batch([Train_rescaled_real, Condition_Train_rescaled_real], Train_rescaled_real_label)
-        d_loss_f, d_acc_f = discriminator.train_on_batch([Train_rescaled_fake, Condition_Train_rescaled_real], Train_rescaled_fake_label)
-        d_loss = 0.5 * np.add(d_loss_r, d_loss_f)
-        d_acc = 0.5 * np.add(d_acc_r, d_acc_f)
+            d_loss_r, d_acc_r = discriminator.train_on_batch([Train_rescaled_real, Condition_Train_rescaled_real], Train_rescaled_real_label)
+            d_loss_f, d_acc_f = discriminator.train_on_batch([Train_rescaled_fake, Condition_Train_rescaled_real], Train_rescaled_fake_label)
+            d_loss = 0.5 * np.add(d_loss_r, d_loss_f)
+            d_acc = 0.5 * np.add(d_acc_r, d_acc_f)
 
-        history['d_loss'].append(d_loss)
-        history['d_loss_r'].append(d_loss_r)
-        history['d_loss_f'].append(d_loss_f)
-        history['d_acc'].append(d_acc)
-        history['d_acc_r'].append(d_acc_r)
-        history['d_acc_f'].append(d_acc_f)
-
-        # ---------------------
-        #  Train Generator
-        # ---------------------
-
-        # we want discriminator to mistake images as real
-        discriminator.trainable = False
-
-        g_loss = GAN.train_on_batch([Train_rescaled_noise, Condition_Train_rescaled_real], Train_rescaled_real_label)
-        history['g_loss'].append(g_loss)
-
-        if epoch % 10000 == 0:
-            print('Epoch: %d, discriminator(loss: %.3f, acc.: %.2f%%), generator(loss: %.3f)' % (epoch, d_loss, d_acc*100., g_loss))
-            saved_epoch_list.append(epoch)
-            saved_fakedata_list.append(scaler_Train.inverse_transform(generator([tf.random.uniform((10000, 128)), shuffle(Condition_Train_rescaled)[:10000]], training=False)))
+            history['d_loss'].append(d_loss)
+            history['d_loss_r'].append(d_loss_r)
+            history['d_loss_f'].append(d_loss_f)
+            history['d_acc'].append(d_acc)
+            history['d_acc_r'].append(d_acc_r)
+            history['d_acc_f'].append(d_acc_f)
             
-        epoch += 1
-    
-    np.savez('cGAN_saved_fakedata_%d.npz' %(epoch), epoch=saved_epoch_list, fakedata=saved_fakedata_list)
-    generator.save('cGAN_generator_%d.h5' %(epoch))
-    discriminator.save('cGAN_discriminator_%d.h5' %(epoch))
-    GAN.save('cGAN_%d.h5' %(epoch))
+            # accumulate continuous d_acc
+            if d_acc == 1:
+                d_acc_count += 1
+            else:
+                d_acc_count = 0
+                
+            # ---------------------
+            #  Train Generator
+            # ---------------------
 
-    return
+            # we want discriminator to mistake images as real
+            discriminator.trainable = False
+
+            g_loss = GAN.train_on_batch([Train_rescaled_noise, Condition_Train_rescaled_real], Train_rescaled_real_label)
+            history['g_loss'].append(g_loss)
+
+            if epoch % 10000 == 0:
+                print('Epoch: %d, discriminator(loss: %.3f, acc.: %.2f%%), generator(loss: %.3f)' % (epoch, d_loss, d_acc*100., g_loss))
+                if epoch < epoch_g_stop:
+                    saved_epoch_list.append(epoch)
+                    saved_fakedata_list.append(scaler_Train.inverse_transform(generator([tf.random.uniform((10000, 128)), shuffle(Condition_Train_rescaled)[:10000]], training=False)))
+            
+            # d_loss < 0.5 and g_loss > 2 → save final useful info. of generator
+            if d_loss < 0.5 and g_loss > 2 and epoch < epoch_g_stop:
+                epoch_g_stop = epoch
+                print('Generator training is good enough to stop!')
+                print('Epoch: %d, discriminator(loss: %.3f, acc.: %.2f%%), generator(loss: %.3f)' % (epoch, d_loss, 100., g_loss))
+                saved_epoch_list.append(epoch)
+                saved_fakedata_list.append(scaler_Train.inverse_transform(generator([tf.random.uniform((10000, 128)), shuffle(Condition_Train_rescaled)[:10000]], training=False)))
+                np.savez('cGAN_saved_fakedata_%d.npz' %(epoch_g_stop), epoch=saved_epoch_list, fakedata=saved_fakedata_list)
+                generator.save('cGAN_generator_%d.h5' %(epoch_g_stop))
+        
+            # 100 times 100% → save final useful info. of discriminator
+            if d_acc_count == 100:
+                epoch_d_stop = epoch
+                print('Discriminator training is good enough to stop!')
+                print('Epoch: %d, discriminator(loss: %.3f, acc.: %.2f%%), generator(loss: %.3f)' % (epoch, d_loss, 100., g_loss))
+                discriminator.save('cGAN_discriminator_%d.h5' %(epoch_d_stop))
+                GAN.save('cGAN_%d.h5' %(epoch_d_stop))
+
+    return epoch_g_stop, epoch_d_stop
 
 
 # +
@@ -323,28 +348,30 @@ history = {'g_loss': [],
 
 epochs = 250000
 batch_size = 100
-train_loop(epochs, batch_size)
+epoch_g_stop, epoch_d_stop = train_loop(epochs, batch_size)
 
-with open('cGAN_history_%d.pickle' %(epochs), 'wb') as f:
+with open('cGAN_history_%d.pickle' %(epoch_d_stop), 'wb') as f:
     pickle.dump(history, f)
 
 # +
 # plot final result & check K-L divergence
 
+saved_generator = keras.models.load_model('cGAN_generator_%d.h5' %(epoch_g_stop))
+
 realdata, realcondition = shuffle(Wprime_jet['mj1'], Condition_Train_rescaled)
-fakedata = scaler_Train.inverse_transform(generator([tf.random.uniform((10000, 128)), realcondition[:10000]], training=False))
+fakedata = scaler_Train.inverse_transform(saved_generator([tf.random.uniform((10000, 128)), realcondition[:10000]], training=False))
 
 realhist, realbins = np.histogram(realdata[:10000], bins = 25, range = (10, 600), density=1)
 fakehist, fakebins = np.histogram(fakedata[:,2], bins = 25, range = (10, 600), density=1)
 
-fig, axis = plt.subplots(1, 1, figsize=(8,8))
-plt.title('epoch = '+str(epochs), fontsize=20)
-plt.ylim([0,0.012])
+fig, axis = plt.subplots(1, 1, figsize=(8,8), dpi=150)
+plt.title('epoch = '+str(epoch_g_stop), fontsize=20)
+plt.ylim([0, 0.012])
 plt.step(fakebins[:-1], fakehist, label = 'cGAN')
 plt.step(realbins[:-1], realhist, label = 'Pythia8 Signal')
 plt.xlabel('$m_{J_1}$', fontsize=20)
 plt.legend(loc='upper right', fontsize=20)
-fig.savefig('epoch_final.png')
+plt.savefig('epoch_final.png')
 plt.show()
 
 def KL_divergent(p,q):
@@ -357,10 +384,15 @@ print("KL Divergence D_KL(flat||real): {:.3f}".format(KL_divergent(np.full(len(r
 # +
 # plot loss function & accuracy
 
+with open('cGAN_history_%d.pickle' %(epoch_d_stop), 'rb') as f:
+    saved_history = pickle.load(f)
+
+print(saved_history.keys())
+
 plt.figure(figsize=(7,5), dpi=150)
 plt.title('g_loss and d_loss')
-plt.plot(history['g_loss'], label='g_loss')
-plt.plot(history['d_loss'], label='d_loss')
+plt.plot(saved_history['g_loss'], label='g_loss')
+plt.plot(saved_history['d_loss'], label='d_loss')
 plt.ylabel('loss function')
 plt.xlabel('epoch')
 plt.legend()
@@ -369,7 +401,7 @@ plt.show()
 
 plt.figure(figsize=(7,5), dpi=150)
 plt.title('d_acc')
-plt.plot(history['d_acc'])
+plt.plot(saved_history['d_acc'])
 plt.ylabel('accuracy')
 plt.xlabel('epoch')
 plt.savefig('accuracy.png')
@@ -378,7 +410,7 @@ plt.show()
 # +
 # plot .gif of epochs evolution
 
-saved_fakedata = np.load('cGAN_saved_fakedata_%d.npz' %(epochs))
+saved_fakedata = np.load('cGAN_saved_fakedata_%d.npz' %(epoch_g_stop))
 
 print('files: ', saved_fakedata.files)
 print('fakedata.shape: ', saved_fakedata['fakedata'].shape)
@@ -392,8 +424,8 @@ for i in range(saved_fakedata['fakedata'].shape[0]):
     fig, axis = plt.subplots(1, 1, figsize=(8,8), dpi=150)
     plt.step(fakebins_old[:-1], fakehist_old, label = 'cGAN')
     plt.step(realbins[:-1], realhist, label = "Pythia8 Signal")
-    plt.title('epoch = '+str(i*10000), fontsize=20)
-    plt.ylim([0,0.012])
+    plt.title('epoch = '+str(saved_fakedata['epoch'][i]), fontsize=20)
+    plt.ylim([0, 0.012])
     plt.xlabel('$m_{J_1}$', fontsize=20)
     plt.legend(loc='upper right', fontsize=20)
     plt.savefig('epoch_'+str(i)+'.png')
@@ -486,7 +518,9 @@ print('Condition_Test_rescaled.shape:', Condition_Test_rescaled.shape)
 # +
 # predict test data → result
 
-result = discriminator.predict([Test_rescaled, Condition_Test_rescaled])
+saved_discriminator = keras.models.load_model('cGAN_discriminator_%d.h5' %(epoch_d_stop))
+
+result = saved_discriminator.predict([Test_rescaled, Condition_Test_rescaled])
 print('result.shape:', result.shape)
 
 print('max of result:', np.max(result))
@@ -507,7 +541,7 @@ print('result_rescaled.shape:', result_rescaled.shape)
 
 result_rescaled_hist, result_rescaled_bins = np.histogram(result_rescaled, bins = 40, range = (0, 1), density=1)
 
-fig, axis = plt.subplots(1, 1, figsize=(8,8))
+fig, axis = plt.subplots(1, 1, figsize=(8,8), dpi=150)
 plt.step(result_rescaled_bins[:-1], result_rescaled_hist, label = "Prediction")
 plt.show()
 
